@@ -19,7 +19,7 @@
 #include <io.h> //access
 #define PATH "C:\\Program Files\\SnoopSpy\\certificate\\"
 #pragma comment (lib, "Ws2_32.lib")
-#define BUFFER 2000 //tcp 패킷 최대 바이트 수 
+#define BUFFER 30000 //tcp 패킷 최대 바이트 수 
 std::string getAddr(char *_data);
 void checkArguments(int argc, char **argv);
 std::string URLToAddrStr(std::string addr);
@@ -103,17 +103,21 @@ int main(int argc, char **argv)
 	struct sockaddr_in serverAddr = initAddr(port, std::string(""));
 	SOCKET Client, Server;
 	open_socket(Server, serverAddr); //소켓 생성 함수 
-	SSL *server_ssl;	
-	while(true)
+	SSL *server_ssl;
+	InitializeCriticalSection(&cs);
+	while (true)
 	{
+
 		if ((Client = accept(Server, NULL, NULL)) == INVALID_SOCKET)
 		{
+
 			printf("error : accept\n");
-			continue;
 		}
-		cout << "접속요청" << endl;
-		std::thread(ssl_forward, serverAddr, Client, server_ssl).join();
+		cout << "클라이언트 ACCEPT 접속요청" << endl;
+		std::thread(ssl_forward, serverAddr, Client, server_ssl).detach();
+
 	}
+	DeleteCriticalSection(&cs);
 }
 std::string getAddr(char *_data)
 {
@@ -204,31 +208,38 @@ void ssl_backward(SSL *serverssl, SSL *remote_ssl)
 	char buf[BUFFER];
 	char *remotebuf;
 	int recvlen;
-	EnterCriticalSection(&cs);
-	while ((recvlen = SSL_read(remote_ssl, buf, BUFFER)) > 0)
+	
+	while ((recvlen = SSL_read(remote_ssl, buf, BUFFER)) >= 0)
 	{
+		if (recvlen == 0)
+			continue;
+		EnterCriticalSection(&cs);
+		//LeaveCriticalSection(&cs);
 		std::cout << "Back ward byte :" << recvlen << endl;;
 		std::cout << "수신완료" << endl;
-		if (recvlen == 0)
-		{
-			std::cout << "error : ssl backward recv()" << endl;
-			continue;
-		}
 		remotebuf = (char *)calloc(recvlen, sizeof(recvlen));
 		memcpy(remotebuf, buf, recvlen);
+		cout << "BackWard Thread" << endl;
 		cout << remotebuf << endl;
+		//EnterCriticalSection(&cs);
 		if (SSL_write(serverssl, remotebuf, recvlen) == SOCKET_ERROR)
 		{
 			printf("ssl packet send to client failed.");
 			break;
+			
 		}
-		cout << "클라이언트로 보냄" << endl;
+	
 		memset(buf, NULL, BUFFER);
-	}
 	LeaveCriticalSection(&cs);
+	}
+	
+	cout << "백워드 리시브 길이" << endl;
+	cout << recvlen << endl;
+	//delete[] remotebuf;
+
 	std::cout << "클라이언트로 전송완료" << endl;
 	std::cout << " 쓰레드 종료" << endl;
-
+	//SSL_free(remote_ssl);
 }
 
 int servernamecallback(SSL *ssl, int *ad, void *arg)
@@ -254,18 +265,20 @@ int servernamecallback(SSL *ssl, int *ad, void *arg)
 	}
 	else
 	{
-		
+
 		if (system(bat.c_str()) != 0)
 		{
 			cout << "make site 삽입 실패" << endl;
 		}
-		
+
 	}
+
 	load_certificate(ctx, pem, pem);
 	//certificate(ssl, 0);
+
 	SSL_set_SSL_CTX(ssl, ctx);
 	LeaveCriticalSection(&cs);
-	
+
 	return SSL_TLSEXT_ERR_NOACK;
 
 }
@@ -278,7 +291,6 @@ void ssl_forward(struct sockaddr_in serverAddr, SOCKET Client, SSL *server_ssl)
 	char buf[BUFFER];
 	char *recvbuf;
 	int recvbuflen;
-	string recvbuf_copy;
 	std::string hostAddr, domainip;
 	SOCKET RemoteSocket;
 	struct sockaddr_in remoteAddr;
@@ -288,6 +300,8 @@ void ssl_forward(struct sockaddr_in serverAddr, SOCKET Client, SSL *server_ssl)
 	SSL_CTX *client_ctx = clear_method((SSL_METHOD *)SSLv23_client_method());
 	SSL_CTX *server_ctx = clear_method((SSL_METHOD *)SSLv23_method());//SSL_CTX()
 	server_certificate += PATH;
+	//Default_certificate  인자
+
 	default_certificate += PATH;
 	default_certificate += "default.pem";
 	if (!server_ctx)
@@ -307,16 +321,15 @@ void ssl_forward(struct sockaddr_in serverAddr, SOCKET Client, SSL *server_ssl)
 		if (strstr(buf, "CONNECT") != NULL)
 		{
 			send(Client, "HTTP/1.0 200 Connection established\r\n\r\n", strlen("HTTP/1.0 200 Connection established\r\n\r\n"), 0);
+			memset(buf, NULL, BUFFER);
 		}
 	}
-	InitializeCriticalSection(&cs);
-	while (true)
-	{
-		
+		EnterCriticalSection(&cs);
 		if ((server_ssl = SSL_new(server_ctx)) == NULL)
 		{
 			std::cout << "SSL NULL" << std::endl;
 		}
+		LeaveCriticalSection(&cs);
 		if (!SSL_CTX_set_tlsext_servername_callback(server_ctx, servernamecallback))
 		{
 			cout << "ssl_ctx_set_tlsext_servername_callback return false" << endl;
@@ -327,112 +340,98 @@ void ssl_forward(struct sockaddr_in serverAddr, SOCKET Client, SSL *server_ssl)
 			cout << "ssl_ctx_set_tlsext_servername_arg return false" << endl;
 
 		}
+
+		EnterCriticalSection(&cs);
 		SSL_set_fd(server_ssl, Client);
+		while (true)
+		{
 		if (SSL_accept(server_ssl) == -1)
 		{
 			cout << "accept Error" << endl;
-		}
-		cout << "ssl_accept success" << endl;
-		hostAddr = SSL_get_servername(server_ssl, TLSEXT_NAMETYPE_host_name);
-		cout << "접속 성공" << endl;
-		cout << "호스트 :" << hostAddr;
-
-		if (hostAddr == "")
-		{
-			
-		load_certificate(client_ctx, default_certificate, default_certificate);
-		}
-		server_certificate += hostAddr;
-		server_certificate += ".pem";
-		domainip = URLToAddrStr(hostAddr);
-		if (domainip == "")
-		{
 			return;
 		}
+		cout << "ssl_accept success" << endl;
+		LeaveCriticalSection(&cs);
+
 		
-
-
-
-
-
-
-		if ((RemoteSocket = socket(PF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
-		{
-			errorHandle("ERROR : Create a Socket for conneting to server\n", NULL);
-		}
-		std::cout << "remote 소켓생성 완료" << endl;
-		remoteAddr = initAddr(port, domainip); //포트와 도메인 소켓에 넣기 
-		if (connect(RemoteSocket, (struct sockaddr*) &remoteAddr, sizeof(remoteAddr)) == SOCKET_ERROR)
-		{
-			errorHandle("Connect Socket err", RemoteSocket);
-			continue;
-		}
-		if ((client_ssl = SSL_new(client_ctx)) == NULL)
-		{
-			cout << "ssl is empty" << endl;
-		}
-		cout << "클라이언트 호스트 : " << hostAddr;
-		SSL_set_connect_state(client_ssl); //자동으로 SSL_CONNECT가 가능하도록 설정해주는 함수
-		SSL_set_fd(client_ssl, RemoteSocket);
-		if (SSL_connect(client_ssl) == NULL)
-		{
-			cout << " ssl not connect" << endl;
-			SSL_free(client_ssl);
-			continue;
-		}
-		printf("SSL connection using %s\n", SSL_get_cipher(client_ssl));
-		std::cout << "remote 연결" << endl;
-		certificate(client_ssl, 1);
-
-		std::thread(ssl_backward, server_ssl, client_ssl).detach(); //여기도 블락 걸림
-
-
-
-
-
-
-
-
-
-		while ((recvbuflen = SSL_read(server_ssl, buf, BUFFER)) > 0)
-		{
-			cout << "Forward :" << recvbuflen << endl;
-			recvbuf = (char *)calloc(recvbuflen, sizeof(char));
-			memcpy(recvbuf, buf, recvbuflen);
-			cout << "연결후 요청 패킷" << endl;
-			cout << recvbuf << endl;
-			
-
-
-
-
-
-
-
-
-
-
-
-
-
-			
-			std::cout << "웹서버로 보냄\n" << endl;
-			if (SSL_write(client_ssl, recvbuf, recvbuflen) == SOCKET_ERROR)
+			EnterCriticalSection(&cs);
+			while ((recvbuflen = SSL_read(server_ssl, buf, BUFFER)) >= 0)
 			{
-				printf("send to webserver failed.");
-				break;
+				if (recvbuflen == 0)
+					continue;
+				hostAddr = SSL_get_servername(server_ssl, TLSEXT_NAMETYPE_host_name);
+				LeaveCriticalSection(&cs);
+				cout << "호스트 :" << hostAddr;
+				cout << "버퍼 확인" << endl;
+				cout << buf << endl;
+				cout << "Forward :" << recvbuflen << endl;
+				recvbuf = (char *)calloc(recvbuflen, sizeof(char));
+				memcpy(recvbuf, buf, recvbuflen);
+				cout << "연결후 요청 패킷" << endl;
+				cout << recvbuf << endl;
+
+				if (hostAddr == "")
+				{
+
+					load_certificate(client_ctx, default_certificate, default_certificate);
+				}
+				server_certificate += hostAddr;
+				server_certificate += ".pem";
+				domainip = URLToAddrStr(hostAddr);
+				if (domainip == "")
+				{
+				}
+				if ((RemoteSocket = socket(PF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
+				{
+					errorHandle("ERROR : Create a Socket for conneting to server\n", NULL);
+				}
+				std::cout << "remote 소켓생성 완료" << endl;
+				remoteAddr = initAddr(port, domainip); //포트와 도메인 소켓에 넣기 
+				if (connect(RemoteSocket, (struct sockaddr*) &remoteAddr, sizeof(remoteAddr)) == SOCKET_ERROR)
+				{
+					errorHandle("Connect Socket err", RemoteSocket);
+					//break;
+				}
+				if ((client_ssl = SSL_new(client_ctx)) == NULL)
+				{
+					cout << "ssl is empty" << endl;
+				}
+
+				cout << "클라이언트 호스트 : " << hostAddr;
+				printf("SSL connection using %s\n", SSL_get_cipher(client_ssl));
+				std::cout << "remote 연결" << endl;
+				SSL_set_connect_state(client_ssl);
+				SSL_set_fd(client_ssl, RemoteSocket);
+				if (SSL_connect(client_ssl) == NULL)
+				{
+					cout << " ssl not connect" << endl;
+					//SSL_free(client_ssl);
+					//break;
+
+				}
+				
+				//certificate(client_ssl, 1);
+				std::cout << "웹서버로 보냄\n" << endl;
+				std::thread(ssl_backward, server_ssl, client_ssl).detach();
+
+				if (SSL_write(client_ssl, recvbuf, recvbuflen) == SOCKET_ERROR)
+				{
+					printf("send to webserver failed.");
+					break;
+				}
+				memset(buf, NULL, BUFFER);
+
+				recvbuflen = 0;
 			}
-			
+			hostAddr = "";
 			memset(buf, NULL, BUFFER);
 
-		
-		}
-		//SSL_free(client_ssl);
-		
-		
-		//closesocket(RemoteSocket);
+		if (recvbuflen <= 0)
+			break;
 	}
-	DeleteCriticalSection(&cs);
+
+	cout << "first스레드 끝낸다" << endl;
+
 }
 
 void open_socket(SOCKET &sock, struct sockaddr_in &sockaddr)
@@ -447,4 +446,5 @@ void open_socket(SOCKET &sock, struct sockaddr_in &sockaddr)
 		errorHandle("ERROR : Listen\n", sock);
 	}
 }
+
 
